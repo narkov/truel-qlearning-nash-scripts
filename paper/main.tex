@@ -1,0 +1,340 @@
+\documentclass[11pt]{article}
+
+\usepackage[a4paper,margin=1in]{geometry}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{graphicx}
+\usepackage[section]{placeins} % prevent floats from leaking into later sections
+\graphicspath{{./}{./figs/}}
+\usepackage{booktabs}
+\usepackage{siunitx}
+\usepackage{hyperref}
+\usepackage[numbers]{natbib}
+
+\title{Truels as Markov Games: Winner Landscapes and Exploitability of Heuristic and Learned Policies}
+\author{Nazar~\textit{et al.}}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+A \emph{truel} is the three-player generalization of a duel: each player chooses a target (or abstains) until a single survivor remains.
+Despite its simple rules, truels exhibit counterintuitive phenomena such as ``survival of the weakest,'' and their outcomes depend sharply on both marksmanship parameters and strategic choice.
+We cast the truel as a finite general-sum Markov game and propose a reproducible evaluation protocol that turns ``interesting chaos'' into quantitative evidence:
+(i) coarse parameter scans that produce winner heatmaps under multiple policy families, and
+(ii) \emph{exploitability} heatmaps computed via best responses, measuring how far a policy profile is from equilibrium play.
+We report full-grid winner regions for two classical baselines (``shoot the strongest'' and ``A abstains first'') and for a learned equilibrium-approximate profile (Nash-Q / Friend-or-Foe Q-learning).
+Exploitability slices reveal where heuristic policies are robust and where they are systematically vulnerable.
+Finally, we outline how truel-like three-party dynamics model realistic cybersecurity settings (attacker--defender--deceiver/insider), motivating equilibrium-oriented learning and vulnerability quantification.
+\end{abstract}
+
+\section{Introduction}
+
+Truels have a weird charm: with three guns (or balloons, in the puzzle versions), ``being worse'' can be strategically better.
+The phenomenon appears because the strongest player attracts attention, creating an implicit ``coalition of incentives'' against them even without explicit coordination.
+As a result, the map from abilities to survival is not monotone.
+
+\paragraph{History in brief.}
+The truel entered the literature as a mathematical puzzle (often credited to Kinnaird's 1946 puzzle anthology) and later as an explicit game-theoretic object in the work of Shubik and others on ``does the fittest necessarily survive?'' \citep{Kinnaird1946,Shubik1954,Shubik1982}.
+Formal game-theoretic analyses include Kilgour's early work on simultaneous and sequential variants \citep{Kilgour1972} and the widely-cited exposition by Brams and Kilgour \citep{BramsKilgour1997}.
+Subsequent work explored solution concepts (cooperative vs.\ non-cooperative) \citep{BossertBramsKilgour2002}, Markov-chain analyses and winner distributions \citep{ToralAmengual2005,AmengualToral2006}, and behavioral/strategic variants such as abstention and ``shooting into the air'' \citep{Xu2012,DorrakiAllisonAbbott2019}.
+Truels also appear in physics-flavored settings (e.g., quantum extensions) \citep{FlitneyAbbott2003}.
+A consistent theme across these lines: the \emph{rules of play} and the \emph{strategies} matter as much as raw marksmanship.
+
+\paragraph{Why bring reinforcement learning (RL) into this?}
+Because the moment you say ``cybersecurity,'' you have an adaptive multi-agent system.
+Attackers learn, defenders learn, and a third party is often present: an insider, a deception layer, or a competing attacker.
+This naturally suggests \emph{stochastic games} \citep{Shapley1953}, aka Markov games in the RL literature \citep{Littman1994}.
+But multi-agent RL is notoriously non-stationary: if you learn against a moving target, ``convergence'' becomes a mood rather than a theorem.
+Equilibrium-based learning rules such as Nash-Q \citep{HuWellman2003} and structure-exploiting variants like Friend-or-Foe Q-learning \citep{Littman2001} offer a principled anchor: learn relative to equilibrium behavior rather than a particular opponent snapshot.
+
+\paragraph{Our contribution.}
+This paper is a methods-and-results bridge between classical truel analysis and modern evaluation in multi-agent learning.
+We contribute:
+\begin{itemize}
+  \item A clean Markov-game formulation of a standard random truel with abstention.
+  \item A coarse parameter scan over $(a,b,c)$ producing winner heatmaps under multiple policy families.
+  \item An \emph{exploitability} evaluation (and heatmaps) over the same parameter space, using computed best responses as a worst-case vulnerability measure.
+  \item A cybersecurity mapping that motivates why ``winner probabilities'' alone are not enough: we also care about how exploitable a deployed policy is.
+\end{itemize}
+
+\section{Background and Related Work}
+
+\subsection{Truels and the ``survival of the weakest'' paradox}
+The paradoxical regions where weaker players have higher win probability under rational play are reviewed and derived in several classical treatments \citep{BramsKilgour1997,AmengualToral2006}.
+Markov-chain approaches make the dependence on rule variants explicit and provide closed-form win probabilities in common settings \citep{ToralAmengual2005,AmengualToral2006}.
+Modern variants broaden the strategy set (abstention, suicidal/randomized behavior by weaker players) and study how these affect survival regions \citep{DorrakiAllisonAbbott2019}.
+Philosophical and decision-theoretic angles also exist, e.g., analyzing when the worst shooter should abstain initially \citep{Xu2012}.
+
+\subsection{Stochastic games, equilibrium, and multi-agent RL}
+Stochastic games were introduced by Shapley \citep{Shapley1953} and provide the canonical model for sequential multi-agent interaction.
+In RL, the Markov-game framing appears prominently in Littman's work \citep{Littman1994}.
+Single-agent Q-learning is classical \citep{WatkinsDayan1992}; extending it to general-sum multi-agent settings typically requires a game-theoretic solution concept at each stage.
+Nash-Q learning maintains joint-action value functions and computes Nash equilibria of stage games induced by the Q-values \citep{HuWellman2003}.
+Friend-or-Foe Q-learning simplifies the equilibrium computation when opponents are known to be either aligned (friends) or strictly adversarial (foes), retaining convergence guarantees in those cases \citep{Littman2001}.
+For bounded rationality or smooth best responses, quantal response equilibrium provides another link between optimization and realistic behavior \citep{McKelveyPalfrey1995}.
+
+\subsection{Exploitability and vulnerability metrics}
+For deployment, a policy is only as good as its worst-case exposure.
+\emph{Exploitability} measures the gain an adversary can achieve by best-responding to a policy profile; in two-player zero-sum games it aligns cleanly with distance to Nash equilibrium.
+In large games, exact computation can be hard, motivating approximate best responses and approximate exploitability \citep{TimbersEtAl2020}.
+Regret-minimization methods such as Counterfactual Regret Minimization (CFR) are standard for approaching Nash equilibria and connect directly to exploitability in extensive-form games \citep{ZinkevichEtAl2007}.
+
+\section{Model: A Truel as a Finite Markov Game}
+
+We consider three players $A,B,C$ with marksmanship parameters $a,b,c \in (0,1)$, interpreted as hit probabilities when they choose a target.
+At any time, the \emph{state} is the set of surviving players:
+\[
+\mathcal{S}=\{\{A,B,C\},\{A,B\},\{A,C\},\{B,C\},\{A\},\{B\},\{C\}\}.
+\]
+Absorbing terminal states are $\{A\},\{B\},\{C\}$.
+
+\paragraph{Turn selection (random truel).}
+At each step, one of the currently alive players is chosen uniformly at random to act \citep{AmengualToral2006}.
+
+\paragraph{Actions.}
+If player $i$ is chosen and at least one opponent is alive, $i$ selects an action
+\[
+u_i \in \{\text{shoot }j \ \text{for each alive } j\neq i\}\ \cup\ \{\text{abstain}\}.
+\]
+If $i$ shoots $j$, then $j$ is removed from the state with probability equal to $i$'s marksmanship; otherwise the state remains unchanged.
+If $i$ abstains, the state remains unchanged.
+
+\paragraph{Utilities.}
+Each player receives terminal utility $1$ if they are the sole survivor and $0$ otherwise.
+Equivalently, expected utility equals the survival (win) probability from the initial state.
+
+This defines a finite episodic general-sum Markov game.
+
+\section{Policies, Learning, and Evaluation}
+
+\subsection{Policy families}
+We study three profiles:
+\begin{enumerate}
+  \item \textbf{Baseline Strongest (BS):} each acting player shoots the strongest remaining opponent (ties broken deterministically).
+  \item \textbf{Baseline A-pass (AP):} player $A$ abstains in the initial $ABC$ state; otherwise players follow the strongest-opponent rule.
+  \item \textbf{Learned equilibrium-approx (LQ):} a learned profile produced by Nash-Q \citep{HuWellman2003} or Friend-or-Foe Q-learning \citep{Littman2001}, trained on the Markov-game dynamics above.
+\end{enumerate}
+
+\subsection{Coarse parameter scan and winner heatmaps}
+We scan a coarse grid $a,b,c \in \{0.1,0.2,\dots,0.9\}$ and, for each point, estimate (or compute exactly, since the state space is tiny) the win probabilities under each policy profile.
+We then color each grid point by $\arg\max\{\pi_A,\pi_B,\pi_C\}$ to obtain winner heatmaps.
+
+\subsection{Exploitability}
+Fix a policy profile $\pi=(\pi_A,\pi_B,\pi_C)$ and let $u_i(\pi)$ be player $i$'s expected payoff (win probability) from the start state.
+Define player $i$'s \emph{deviation gain} (one-player best response) by
+\[
+\delta_i(\pi)= \max_{\pi_i'} u_i(\pi_i',\pi_{-i}) - u_i(\pi).
+\]
+The \emph{(one-step) exploitability} of the profile is then
+\[
+\mathrm{Exploit}(\pi)=\sum_{i\in\{A,B,C\}}\delta_i(\pi),
+\]
+and we also report the vector $(\delta_A,\delta_B,\delta_C)$.
+This is the ``how much can a rational attacker improve by deviating'' metric: if it is near zero, the profile is close to a Nash equilibrium in the sense of $\epsilon$-Nash \citep{TimbersEtAl2020}.
+
+\paragraph{Computation in this truel.}
+Because $\mathcal{S}$ is tiny and actions are discrete, best responses can be computed by dynamic programming / value iteration on the induced MDP for each deviating player (holding the other two fixed).
+This makes \emph{full-grid exploitability maps} feasible.
+
+\section{Results}
+
+\subsection{Paired winner--exploitability heatmaps}
+We visualize (i) the winning label (argmax win probability) and (ii) total exploitability across $(b,c)$ for three $a$-slices. These paired plots separate performance from strategic robustness.
+
+\begin{figure}[!htbp]
+  \centering
+  \begin{minipage}[t]{0.48\linewidth}
+    \centering\includegraphics[width=\linewidth]{\detokenize{figs/winner_policy_shoot_strongest_a_0.1.pdf}}
+  \end{minipage}
+  \begin{minipage}[t]{0.48\linewidth}
+    \centering\includegraphics[width=\linewidth]{\detokenize{figs/exploit_policy_shoot_strongest_a_0.1.pdf}}
+  \end{minipage}
+  \caption{Paired heatmaps for policy \texttt{shoot\_strongest} at $a=0.1$. Left: winner label (0=A,1=B,2=C) computed from exact absorption probabilities. Right: total exploitability $\sum_i \mathrm{Exploit}_i$ (payoff scale).}
+  \label{fig:shoot-strongest:a0p1}
+\end{figure}
+
+\begin{figure}[!htbp]
+  \centering
+  \begin{minipage}[t]{0.48\linewidth}
+    \centering\includegraphics[width=\linewidth]{\detokenize{figs/winner_policy_shoot_strongest_a_0.5.pdf}}
+  \end{minipage}
+  \begin{minipage}[t]{0.48\linewidth}
+    \centering\includegraphics[width=\linewidth]{\detokenize{figs/exploit_policy_shoot_strongest_a_0.5.pdf}}
+  \end{minipage}
+  \caption{Paired heatmaps for policy \texttt{shoot\_strongest} at $a=0.5$. Left: winner label (0=A,1=B,2=C) computed from exact absorption probabilities. Right: total exploitability $\sum_i \mathrm{Exploit}_i$ (payoff scale).}
+  \label{fig:shoot-strongest:a0p5}
+\end{figure}
+
+\begin{figure}[!htbp]
+  \centering
+  \begin{minipage}[t]{0.48\linewidth}
+    \centering\includegraphics[width=\linewidth]{\detokenize{figs/winner_policy_shoot_strongest_a_0.9.pdf}}
+  \end{minipage}
+  \begin{minipage}[t]{0.48\linewidth}
+    \centering\includegraphics[width=\linewidth]{\detokenize{figs/exploit_policy_shoot_strongest_a_0.9.pdf}}
+  \end{minipage}
+  \caption{Paired heatmaps for policy \texttt{shoot\_strongest} at $a=0.9$. Left: winner label (0=A,1=B,2=C) computed from exact absorption probabilities. Right: total exploitability $\sum_i \mathrm{Exploit}_i$ (payoff scale).}
+  \label{fig:shoot-strongest:a0p9}
+\end{figure}
+
+\begin{figure}[!htbp]
+  \centering
+  \begin{minipage}[t]{0.48\linewidth}
+    \centering\includegraphics[width=\linewidth]{\detokenize{figs/winner_policy_A_pass_a_0.1.pdf}}
+  \end{minipage}
+  \begin{minipage}[t]{0.48\linewidth}
+    \centering\includegraphics[width=\linewidth]{\detokenize{figs/exploit_policy_A_pass_a_0.1.pdf}}
+  \end{minipage}
+  \caption{Paired heatmaps for policy \texttt{A\_pass} at $a=0.1$. Left: winner label (0=A,1=B,2=C) computed from exact absorption probabilities. Right: total exploitability $\sum_i \mathrm{Exploit}_i$ (payoff scale).}
+  \label{fig:A-pass:a0p1}
+\end{figure}
+
+\begin{figure}[!htbp]
+  \centering
+  \begin{minipage}[t]{0.48\linewidth}
+    \centering\includegraphics[width=\linewidth]{\detokenize{figs/winner_policy_A_pass_a_0.5.pdf}}
+  \end{minipage}
+  \begin{minipage}[t]{0.48\linewidth}
+    \centering\includegraphics[width=\linewidth]{\detokenize{figs/exploit_policy_A_pass_a_0.5.pdf}}
+  \end{minipage}
+  \caption{Paired heatmaps for policy \texttt{A\_pass} at $a=0.5$. Left: winner label (0=A,1=B,2=C) computed from exact absorption probabilities. Right: total exploitability $\sum_i \mathrm{Exploit}_i$ (payoff scale).}
+  \label{fig:A-pass:a0p5}
+\end{figure}
+
+\begin{figure}[!htbp]
+  \centering
+  \begin{minipage}[t]{0.48\linewidth}
+    \centering\includegraphics[width=\linewidth]{\detokenize{figs/winner_policy_A_pass_a_0.9.pdf}}
+  \end{minipage}
+  \begin{minipage}[t]{0.48\linewidth}
+    \centering\includegraphics[width=\linewidth]{\detokenize{figs/exploit_policy_A_pass_a_0.9.pdf}}
+  \end{minipage}
+  \caption{Paired heatmaps for policy \texttt{A\_pass} at $a=0.9$. Left: winner label (0=A,1=B,2=C) computed from exact absorption probabilities. Right: total exploitability $\sum_i \mathrm{Exploit}_i$ (payoff scale).}
+  \label{fig:A-pass:a0p9}
+\end{figure}
+
+\begin{figure}[!htbp]
+  \centering
+  \begin{minipage}[t]{0.48\linewidth}
+    \centering\includegraphics[width=\linewidth]{\detokenize{figs/winner_policy_nash_approx_a_0.1.pdf}}
+  \end{minipage}
+  \begin{minipage}[t]{0.48\linewidth}
+    \centering\includegraphics[width=\linewidth]{\detokenize{figs/exploit_policy_nash_approx_a_0.1.pdf}}
+  \end{minipage}
+  \caption{Paired heatmaps for policy \texttt{nash\_approx} at $a=0.1$. Left: winner label (0=A,1=B,2=C) computed from exact absorption probabilities. Right: total exploitability $\sum_i \mathrm{Exploit}_i$ (payoff scale).}
+  \label{fig:nash-approx:a0p1}
+\end{figure}
+
+\begin{figure}[!htbp]
+  \centering
+  \begin{minipage}[t]{0.48\linewidth}
+    \centering\includegraphics[width=\linewidth]{\detokenize{figs/winner_policy_nash_approx_a_0.5.pdf}}
+  \end{minipage}
+  \begin{minipage}[t]{0.48\linewidth}
+    \centering\includegraphics[width=\linewidth]{\detokenize{figs/exploit_policy_nash_approx_a_0.5.pdf}}
+  \end{minipage}
+  \caption{Paired heatmaps for policy \texttt{nash\_approx} at $a=0.5$. Left: winner label (0=A,1=B,2=C) computed from exact absorption probabilities. Right: total exploitability $\sum_i \mathrm{Exploit}_i$ (payoff scale).}
+  \label{fig:nash-approx:a0p5}
+\end{figure}
+
+\begin{figure}[!htbp]
+  \centering
+  \begin{minipage}[t]{0.48\linewidth}
+    \centering\includegraphics[width=\linewidth]{\detokenize{figs/winner_policy_nash_approx_a_0.9.pdf}}
+  \end{minipage}
+  \begin{minipage}[t]{0.48\linewidth}
+    \centering\includegraphics[width=\linewidth]{\detokenize{figs/exploit_policy_nash_approx_a_0.9.pdf}}
+  \end{minipage}
+  \caption{Paired heatmaps for policy \texttt{nash\_approx} at $a=0.9$. Left: winner label (0=A,1=B,2=C) computed from exact absorption probabilities. Right: total exploitability $\sum_i \mathrm{Exploit}_i$ (payoff scale).}
+  \label{fig:nash-approx:a0p9}
+\end{figure}
+
+
+
+
+We include:
+(i) winner heatmaps for each policy family, and
+(ii) exploitability heatmaps (and slices at fixed $a$ values) for the learned and baseline profiles.
+
+\paragraph{Winner landscapes.}
+Baseline Strongest reproduces the known non-monotonic winner regions and ``survival of the weakest'' pockets observed in classical analyses \citep{AmengualToral2006,DorrakiAllisonAbbott2019}.
+Baseline A-pass shifts these regions and, in some $(a,b,c)$ settings, improves $A$'s survival probability by avoiding being the first ``magnet'' for incoming fire.
+
+\paragraph{Exploitability landscapes.}
+Exploitability heatmaps identify parameter regions where a heuristic profile is brittle:
+even if it yields a decent win probability in expectation, a single best-responding opponent can substantially increase their chance of winning.
+The learned equilibrium-approx profile typically reduces exploitability, but the reduction is not uniform across the parameter space; the slices show where learning remains vulnerable and where it becomes robust.
+
+\paragraph{A useful plot: winner vs.\ exploitability.}
+Combining winner identity with exploitability (e.g., scatter or binned maps) reveals cases where a policy ``wins'' but remains highly exploitable—exactly the kind of trap that matters in adversarial domains.
+
+\section{Cybersecurity Interpretation}
+
+Truels are not literally gunfights in practice (sadly, most networks are made of packets, not pistols), but the structure is familiar:
+
+\begin{itemize}
+  \item \textbf{Attacker--Defender--Insider:} an external attacker ($C$), a defender ($A$), and an insider threat or compromised component ($B$).
+  \item \textbf{Attacker--Defender--Deception:} defense deploys deception (honeypots, decoys) that behaves like a third strategic entity influencing targeting incentives.
+  \item \textbf{Competing attackers:} two attackers compete for access and resources while a defender adapts.
+\end{itemize}
+
+In such settings, ``best shot'' is a stand-in for capability (exploit reliability, detection quality, response speed), and the key operational question is not only ``who wins'' but ``how exploitable is our deployed policy?''
+Exploitability maps provide a vulnerability landscape: where small deviations (new attacker tactics) can extract large gains, a system is strategically fragile.
+
+\section{Conclusion and Next Steps}
+
+We presented a compact but evidence-driven pipeline for studying truels as Markov games:
+winner heatmaps plus exploitability heatmaps.
+This connects classical paradoxes in truels to a modern robustness metric used in game AI and adversarial learning.
+
+Near-term extensions:
+(i) finer grids and confidence bounds,
+(ii) richer action sets (costly shots, imperfect observation, limited ammo),
+(iii) moving from one-player deviations to coalition deviations,
+(iv) explicit cybersecurity toy environments where $a,b,c$ emerge from measurable system properties.
+
+\section*{Reproducibility}
+We provide scripts to reproduce all parameter scans and exploitability maps, and we release the aggregated CSV outputs used to generate the figures.
+
+
+\FloatBarrier
+\clearpage
+\appendix
+\section{Per-player exploitability maps}
+For $a=0.1$ we additionally report per-player exploitability maps. Each panel shows the payoff improvement obtainable by a single player deviating to a best response.
+
+\begin{figure}[!htbp]
+  \centering
+  \begin{minipage}[t]{0.32\linewidth}\centering\includegraphics[width=\linewidth]{\detokenize{figs/exploit_A_policy_shoot_strongest_a_0.1.pdf}}\end{minipage}
+  \begin{minipage}[t]{0.32\linewidth}\centering\includegraphics[width=\linewidth]{\detokenize{figs/exploit_B_policy_shoot_strongest_a_0.1.pdf}}\end{minipage}
+  \begin{minipage}[t]{0.32\linewidth}\centering\includegraphics[width=\linewidth]{\detokenize{figs/exploit_C_policy_shoot_strongest_a_0.1.pdf}}\end{minipage}
+  \caption{Per-player exploitability at $a=0.1$ for policy \texttt{shoot\_strongest}. Left: player A; middle: player B; right: player C.}
+  \label{fig:perplayer:shoot-strongest:a0p1}
+\end{figure}
+
+\begin{figure}[!htbp]
+  \centering
+  \begin{minipage}[t]{0.32\linewidth}\centering\includegraphics[width=\linewidth]{\detokenize{figs/exploit_A_policy_A_pass_a_0.1.pdf}}\end{minipage}
+  \begin{minipage}[t]{0.32\linewidth}\centering\includegraphics[width=\linewidth]{\detokenize{figs/exploit_B_policy_A_pass_a_0.1.pdf}}\end{minipage}
+  \begin{minipage}[t]{0.32\linewidth}\centering\includegraphics[width=\linewidth]{\detokenize{figs/exploit_C_policy_A_pass_a_0.1.pdf}}\end{minipage}
+  \caption{Per-player exploitability at $a=0.1$ for policy \texttt{A\_pass}. Left: player A; middle: player B; right: player C.}
+  \label{fig:perplayer:A-pass:a0p1}
+\end{figure}
+
+\begin{figure}[!htbp]
+  \centering
+  \begin{minipage}[t]{0.32\linewidth}\centering\includegraphics[width=\linewidth]{\detokenize{figs/exploit_A_policy_nash_approx_a_0.1.pdf}}\end{minipage}
+  \begin{minipage}[t]{0.32\linewidth}\centering\includegraphics[width=\linewidth]{\detokenize{figs/exploit_B_policy_nash_approx_a_0.1.pdf}}\end{minipage}
+  \begin{minipage}[t]{0.32\linewidth}\centering\includegraphics[width=\linewidth]{\detokenize{figs/exploit_C_policy_nash_approx_a_0.1.pdf}}\end{minipage}
+  \caption{Per-player exploitability at $a=0.1$ for policy \texttt{nash\_approx}. Left: player A; middle: player B; right: player C.}
+  \label{fig:perplayer:nash-approx:a0p1}
+\end{figure}
+
+
+\FloatBarrier
+\clearpage
+\bibliographystyle{plainnat}
+\bibliography{truel_refs}
+
+\end{document}
