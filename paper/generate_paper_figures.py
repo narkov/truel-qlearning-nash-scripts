@@ -249,6 +249,9 @@ def best_response_value(acc, policy_fn, br_player):
     return best_V
 
 
+NOISE_THRESHOLD = 1e-10
+
+
 def compute_exploitability(acc, policy_fn):
     s0_idx = STATE_IDX[init_state()]
     base_V = compute_win_probs(acc, policy_fn)
@@ -257,7 +260,13 @@ def compute_exploitability(acc, policy_fn):
     for i in range(3):
         br_V = best_response_value(acc, policy_fn, i)
         br_u = br_V[s0_idx]
-        deltas.append(max(0.0, br_u[i] - base_u[i]))
+        raw = br_u[i] - base_u[i]
+        # Clamp: exploitability is non-negative by definition;
+        # zero out numerical noise below threshold.
+        d = max(0.0, raw)
+        if d < NOISE_THRESHOLD:
+            d = 0.0
+        deltas.append(d)
     return float(sum(deltas)), deltas
 
 
@@ -304,7 +313,18 @@ def plot_winner(grid, grid_vals, policy_name, a_val, fname):
 
 def plot_exploit(grid, grid_vals, policy_name, a_val, fname, label="Total exploitability"):
     fig, ax = plt.subplots(figsize=(4.2, 3.5))
-    im = ax.pcolormesh(grid_vals, grid_vals, grid, cmap="viridis", shading="nearest", vmin=0)
+    grid_max = float(np.nanmax(grid))
+    if grid_max < NOISE_THRESHOLD:
+        # Grid is effectively zero everywhere — show uniform color + annotation
+        im = ax.pcolormesh(grid_vals, grid_vals, np.zeros_like(grid),
+                           cmap="viridis", shading="nearest", vmin=0, vmax=1)
+        ax.text(0.5, 0.5, "≈ 0 everywhere\n(within numerical precision)",
+                transform=ax.transAxes, ha="center", va="center",
+                fontsize=11, fontweight="bold", color="white",
+                bbox=dict(boxstyle="round,pad=0.4", facecolor="black", alpha=0.7))
+    else:
+        im = ax.pcolormesh(grid_vals, grid_vals, grid, cmap="viridis",
+                           shading="nearest", vmin=0)
     cbar = fig.colorbar(im, ax=ax)
     cbar.set_label(label, fontsize=8)
     ax.set_xlabel("c (accuracy of C)")
@@ -330,6 +350,16 @@ def main():
             plot_winner(winner, grid_vals, pol_name, a_val, f"figs/winner_{tag}.pdf")
             plot_exploit(exploit, grid_vals, pol_name, a_val, f"figs/exploit_{tag}.pdf")
 
+            # Sanity check: verify total == sum of per-player
+            diff = np.abs(exploit - sum(exploit_per[p] for p in range(3)))
+            max_diff = np.nanmax(diff)
+            if max_diff > NOISE_THRESHOLD:
+                print(f"WARNING: total != sum(per-player), max diff = {max_diff:.2e}")
+
+            # Report stats
+            ex_max = np.nanmax(exploit)
+            print(f"exploit max={ex_max:.6f}", end=" ")
+
             if abs(a_val - 0.1) < 0.01:
                 for p, pn in enumerate(["A", "B", "C"]):
                     plot_exploit(
@@ -340,6 +370,9 @@ def main():
                         f"figs/exploit_{pn}_{tag}.pdf",
                         label=f"Exploitability of {pn}",
                     )
+                    pp_max = np.nanmax(exploit_per[p])
+                    pp_min = np.nanmin(exploit_per[p])
+                    print(f"[{pn}: {pp_min:.2e}..{pp_max:.2e}]", end=" ")
             print("done")
 
     print("\nAll figures saved to figs/")
