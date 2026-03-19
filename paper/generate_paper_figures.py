@@ -1,60 +1,54 @@
 #!/usr/bin/env python3
 """
-Generate all figures for the truel paper — matching Overleaf style.
-Turn-based cyclic truel: players act in order A->B->C->A->... (skipping dead).
-State = (alive_mask, turn). Exact via DP value iteration.
+Generate all figures for the truel paper.
+
+This script matches the model described in main.tex:
+- random turn selection among currently alive players
+- state = alive_mask only
+- exact policy evaluation via linear solves
+- exact one-player best responses via deterministic policy enumeration
 """
+import itertools
 import os
-import numpy as np
+
 import matplotlib
-matplotlib.use('Agg')
+import numpy as np
+
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.colors import BoundaryNorm
 
-os.makedirs("figs", exist_ok=True)
-plt.rcParams.update({
-    "figure.dpi": 150,
-    "savefig.bbox": "tight",
-    "font.size": 9,
-    "axes.titlesize": 9,
-})
 
-# ─── Turn-based Truel Environment ────────────────────────────────────────────
+os.makedirs("figs", exist_ok=True)
+plt.rcParams.update(
+    {
+        "figure.dpi": 150,
+        "savefig.bbox": "tight",
+        "font.size": 9,
+        "axes.titlesize": 9,
+    }
+)
+
 
 def is_alive(mask, p):
     return (mask >> p) & 1
 
+
 def popcount(mask):
-    return bin(mask).count('1')
+    return bin(mask).count("1")
+
 
 def kill(mask, p):
     return mask & ~(1 << p)
 
-def next_turn(mask, cur, n=3):
-    for k in range(1, n + 1):
-        c = (cur + k) % n
-        if is_alive(mask, c):
-            return c
-    return cur
 
-def enum_states(n=3):
-    """State = (alive_mask, turn) where turn is alive."""
-    states = []
-    for mask in range(1, 1 << n):
-        for turn in range(n):
-            if is_alive(mask, turn):
-                states.append((mask, turn))
-    return states
+def alive_players(mask):
+    return [p for p in range(3) if is_alive(mask, p)]
 
-ALL_STATES = enum_states()
-STATE_IDX = {s: i for i, s in enumerate(ALL_STATES)}
-N_STATES = len(ALL_STATES)
-
-def init_state(turn=0):
-    return (0b111, turn)
 
 def is_terminal(mask):
     return popcount(mask) <= 1
+
 
 def winner(mask):
     if popcount(mask) != 1:
@@ -64,61 +58,84 @@ def winner(mask):
             return p
     return None
 
-def legal_actions(mask, turn):
-    if is_terminal(mask):
+
+ALL_STATES = [mask for mask in range(1, 1 << 3)]
+STATE_IDX = {mask: i for i, mask in enumerate(ALL_STATES)}
+NONTERMINAL_STATES = [mask for mask in ALL_STATES if not is_terminal(mask)]
+TERMINAL_STATES = [mask for mask in ALL_STATES if is_terminal(mask)]
+
+
+def init_state():
+    return 0b111
+
+
+def legal_actions(mask, actor):
+    if is_terminal(mask) or not is_alive(mask, actor):
         return [0]
-    acts = [0]  # abstain
-    for t in range(3):
-        if t != turn and is_alive(mask, t):
-            acts.append(1 + t)
+    acts = [0]
+    for target in alive_players(mask):
+        if target != actor:
+            acts.append(1 + target)
     return acts
 
-def transition(mask, turn, action, acc):
-    """Returns list of (prob, (new_mask, new_turn))."""
-    if is_terminal(mask):
-        return [(1.0, (mask, turn))]
+
+def action_transition(mask, actor, action, acc):
+    """
+    Return a list of (prob, next_mask) for a chosen actor/action.
+    """
+    if is_terminal(mask) or not is_alive(mask, actor):
+        return [(1.0, mask)]
+
     if action == 0:
-        nt = next_turn(mask, turn)
-        return [(1.0, (mask, nt))]
+        return [(1.0, mask)]
+
     target = action - 1
-    if not is_alive(mask, target) or target == turn:
-        nt = next_turn(mask, turn)
-        return [(1.0, (mask, nt))]
-    p_hit = acc[turn]
+    if target == actor or not is_alive(mask, target):
+        return [(1.0, mask)]
+
+    p_hit = float(acc[actor])
     hit_mask = kill(mask, target)
-    outcomes = []
-    # Hit
-    if is_terminal(hit_mask):
-        outcomes.append((p_hit, (hit_mask, turn)))
-    else:
-        nt = next_turn(hit_mask, turn)
-        outcomes.append((p_hit, (hit_mask, nt)))
-    # Miss
-    nt = next_turn(mask, turn)
-    outcomes.append((1.0 - p_hit, (mask, nt)))
-    return outcomes
+    return [(p_hit, hit_mask), (1.0 - p_hit, mask)]
 
 
-# ─── Policies ────────────────────────────────────────────────────────────────
+def random_turn_transition(mask, actions_by_actor, acc):
+    """
+    Return a list of (prob, next_mask) after uniformly sampling the acting player.
+    """
+    if is_terminal(mask):
+        return [(1.0, mask)]
 
-def policy_shoot_strongest(turn, mask, acc):
-    opps = [p for p in range(3) if p != turn and is_alive(mask, p)]
+    probs = {}
+    actors = alive_players(mask)
+    actor_weight = 1.0 / len(actors)
+    for actor in actors:
+        action = actions_by_actor[actor]
+        for prob, next_mask in action_transition(mask, actor, action, acc):
+            probs[next_mask] = probs.get(next_mask, 0.0) + actor_weight * prob
+    return list(probs.items())
+
+
+def policy_shoot_strongest(actor, mask, acc):
+    opps = [p for p in alive_players(mask) if p != actor]
     if not opps:
         return 0
-    target = max(opps, key=lambda p: acc[p])
+    target = max(opps, key=lambda p: (acc[p], -p))
     return 1 + target
 
-def policy_A_pass(turn, mask, acc):
-    if turn == 0 and mask == 0b111:
-        return 0
-    return policy_shoot_strongest(turn, mask, acc)
 
-def policy_nash_approx(turn, mask, acc):
+def policy_A_pass(actor, mask, acc):
+    if actor == 0 and mask == 0b111:
+        return 0
+    return policy_shoot_strongest(actor, mask, acc)
+
+
+def policy_nash_approx(actor, mask, acc):
     if mask == 0b111:
-        weakest = min([p for p in range(3) if is_alive(mask, p)], key=lambda p: acc[p])
-        if turn == weakest:
+        weakest = min(alive_players(mask), key=lambda p: (acc[p], p))
+        if actor == weakest:
             return 0
-    return policy_shoot_strongest(turn, mask, acc)
+    return policy_shoot_strongest(actor, mask, acc)
+
 
 POLICIES = {
     "shoot_strongest": policy_shoot_strongest,
@@ -127,72 +144,113 @@ POLICIES = {
 }
 
 
-# ─── Value Iteration ─────────────────────────────────────────────────────────
+def actions_for_profile(mask, acc, policy_fn):
+    return {actor: policy_fn(actor, mask, acc) for actor in alive_players(mask)}
 
-def compute_win_probs(acc, policy_fn, start_turn=0):
-    """Returns V[state_idx, player]."""
-    V = np.zeros((N_STATES, 3), dtype=float)
-    for si, (mask, turn) in enumerate(ALL_STATES):
+
+def evaluate_transition_kernel(acc, action_selector):
+    """
+    Build the exact transition kernel under a fixed policy profile.
+
+    action_selector(mask) must return {actor: action}.
+    """
+    n_states = len(ALL_STATES)
+    P = np.zeros((n_states, n_states), dtype=float)
+    for mask in ALL_STATES:
+        row = STATE_IDX[mask]
         if is_terminal(mask):
-            w = winner(mask)
-            if w is not None:
-                V[si, w] = 1.0
+            P[row, row] = 1.0
+            continue
+        for next_mask, prob in random_turn_transition(mask, action_selector(mask), acc):
+            P[row, STATE_IDX[next_mask]] += prob
+    return P
 
-    for _ in range(100000):
-        delta = 0.0
-        for si, (mask, turn) in enumerate(ALL_STATES):
-            if is_terminal(mask):
-                continue
-            action = policy_fn(turn, mask, acc)
-            nv = np.zeros(3, dtype=float)
-            for prob, ns in transition(mask, turn, action, acc):
-                nsi = STATE_IDX[ns]
-                nv += prob * V[nsi]
-            delta = max(delta, np.max(np.abs(nv - V[si])))
-            V[si] = nv
-        if delta < 1e-13:
-            break
+
+def solve_win_probs_from_kernel(P):
+    """
+    Solve exact absorption probabilities for each winner.
+    """
+    nt_idx = [STATE_IDX[mask] for mask in NONTERMINAL_STATES]
+    t_idx = [STATE_IDX[mask] for mask in TERMINAL_STATES]
+
+    Q = P[np.ix_(nt_idx, nt_idx)]
+    R = P[np.ix_(nt_idx, t_idx)]
+    I = np.eye(len(nt_idx))
+
+    terminal_payoffs = np.zeros((len(t_idx), 3), dtype=float)
+    for row, mask in enumerate(TERMINAL_STATES):
+        terminal_payoffs[row, winner(mask)] = 1.0
+
+    try:
+        nonterminal_values = np.linalg.solve(I - Q, R @ terminal_payoffs)
+    except np.linalg.LinAlgError as exc:
+        raise ValueError(
+            "Policy profile does not induce a proper absorbing Markov chain."
+        ) from exc
+
+    V = np.zeros((len(ALL_STATES), 3), dtype=float)
+    for row, mask in enumerate(NONTERMINAL_STATES):
+        V[STATE_IDX[mask]] = nonterminal_values[row]
+    for row, mask in enumerate(TERMINAL_STATES):
+        V[STATE_IDX[mask]] = terminal_payoffs[row]
     return V
 
-def best_response_value(acc, policy_fn, br_player, start_turn=0):
-    """BR for br_player, others follow policy_fn."""
-    V = np.zeros((N_STATES, 3), dtype=float)
-    for si, (mask, turn) in enumerate(ALL_STATES):
-        if is_terminal(mask):
-            w = winner(mask)
-            if w is not None:
-                V[si, w] = 1.0
 
-    for _ in range(100000):
-        delta = 0.0
-        for si, (mask, turn) in enumerate(ALL_STATES):
-            if is_terminal(mask):
-                continue
-            if turn == br_player:
-                best_nv = None
-                best_val = -1e30
-                for a in legal_actions(mask, turn):
-                    exp = np.zeros(3, dtype=float)
-                    for prob, ns in transition(mask, turn, a, acc):
-                        exp += prob * V[STATE_IDX[ns]]
-                    if exp[br_player] > best_val + 1e-15:
-                        best_val = exp[br_player]
-                        best_nv = exp
-                nv = best_nv
-            else:
-                action = policy_fn(turn, mask, acc)
-                nv = np.zeros(3, dtype=float)
-                for prob, ns in transition(mask, turn, action, acc):
-                    nv += prob * V[STATE_IDX[ns]]
-            delta = max(delta, np.max(np.abs(nv - V[si])))
-            V[si] = nv
-        if delta < 1e-13:
-            break
-    return V
+def compute_win_probs(acc, policy_fn):
+    P = evaluate_transition_kernel(
+        acc, lambda mask: actions_for_profile(mask, acc, policy_fn)
+    )
+    return solve_win_probs_from_kernel(P)
+
+
+def best_response_value(acc, policy_fn, br_player):
+    """
+    Compute an exact pure best response for br_player.
+
+    Because the state space is tiny, enumerating deterministic policies is
+    simpler and more reliable than undiscounted value iteration with self-loops.
+    """
+    decision_states = [
+        mask for mask in NONTERMINAL_STATES if is_alive(mask, br_player)
+    ]
+    legal_by_state = {
+        mask: legal_actions(mask, br_player) for mask in decision_states
+    }
+
+    best_V = None
+    best_payoff = -np.inf
+    for action_tuple in itertools.product(
+        *(legal_by_state[mask] for mask in decision_states)
+    ):
+        br_actions = dict(zip(decision_states, action_tuple))
+
+        def selector(mask):
+            actions = {}
+            for actor in alive_players(mask):
+                if actor == br_player:
+                    actions[actor] = br_actions[mask]
+                else:
+                    actions[actor] = policy_fn(actor, mask, acc)
+            return actions
+
+        P = evaluate_transition_kernel(acc, selector)
+        try:
+            V = solve_win_probs_from_kernel(P)
+        except ValueError:
+            continue
+        payoff = V[STATE_IDX[init_state()], br_player]
+        if payoff > best_payoff + 1e-15:
+            best_payoff = payoff
+            best_V = V
+
+    if best_V is None:
+        raise ValueError("No proper absorbing best-response policy was found.")
+
+    return best_V
+
 
 def compute_exploitability(acc, policy_fn):
-    s0 = init_state(0)
-    s0_idx = STATE_IDX[s0]
+    s0_idx = STATE_IDX[init_state()]
     base_V = compute_win_probs(acc, policy_fn)
     base_u = base_V[s0_idx]
     deltas = []
@@ -200,10 +258,8 @@ def compute_exploitability(acc, policy_fn):
         br_V = best_response_value(acc, policy_fn, i)
         br_u = br_V[s0_idx]
         deltas.append(max(0.0, br_u[i] - base_u[i]))
-    return sum(deltas), deltas
+    return float(sum(deltas)), deltas
 
-
-# ─── Grid Scan ──────────────────────────────────────────────────────────────
 
 def grid_scan(policy_fn, a_fixed, grid_vals):
     n = len(grid_vals)
@@ -213,10 +269,9 @@ def grid_scan(policy_fn, a_fixed, grid_vals):
 
     for bi, b in enumerate(grid_vals):
         for ci, c in enumerate(grid_vals):
-            acc = [a_fixed, float(b), float(c)]
+            acc = [float(a_fixed), float(b), float(c)]
             V = compute_win_probs(acc, policy_fn)
-            s0 = init_state(0)
-            wp = V[STATE_IDX[s0]]
+            wp = V[STATE_IDX[init_state()]]
             winner_grid[bi, ci] = np.argmax(wp)
 
             total_ex, deltas = compute_exploitability(acc, policy_fn)
@@ -227,14 +282,14 @@ def grid_scan(policy_fn, a_fixed, grid_vals):
     return winner_grid, exploit_grid, exploit_per
 
 
-# ─── Plotting ───────────────────────────────────────────────────────────────
-
 def plot_winner(grid, grid_vals, policy_name, a_val, fname):
     fig, ax = plt.subplots(figsize=(4.2, 3.5))
     cmap = plt.cm.viridis
     bounds = [-0.5, 0.5, 1.5, 2.5]
     norm = BoundaryNorm(bounds, cmap.N)
-    im = ax.pcolormesh(grid_vals, grid_vals, grid, cmap=cmap, norm=norm, shading='nearest')
+    im = ax.pcolormesh(
+        grid_vals, grid_vals, grid, cmap=cmap, norm=norm, shading="nearest"
+    )
     cbar = fig.colorbar(im, ax=ax, ticks=[0, 1, 2])
     cbar.ax.set_yticklabels(["0.00", "1.00", "2.00"])
     ax.set_xlabel("c (accuracy of C)")
@@ -246,9 +301,10 @@ def plot_winner(grid, grid_vals, policy_name, a_val, fname):
     fig.savefig(fname)
     plt.close()
 
+
 def plot_exploit(grid, grid_vals, policy_name, a_val, fname, label="Total exploitability"):
     fig, ax = plt.subplots(figsize=(4.2, 3.5))
-    im = ax.pcolormesh(grid_vals, grid_vals, grid, cmap='viridis', shading='nearest', vmin=0)
+    im = ax.pcolormesh(grid_vals, grid_vals, grid, cmap="viridis", shading="nearest", vmin=0)
     cbar = fig.colorbar(im, ax=ax)
     cbar.set_label(label, fontsize=8)
     ax.set_xlabel("c (accuracy of C)")
@@ -261,10 +317,8 @@ def plot_exploit(grid, grid_vals, policy_name, a_val, fname, label="Total exploi
     plt.close()
 
 
-# ─── Main ───────────────────────────────────────────────────────────────────
-
 def main():
-    grid_vals = np.arange(0.1, 1.0, 0.05)  # finer grid: 0.10, 0.15, ..., 0.95
+    grid_vals = np.arange(0.1, 1.0, 0.05)
     a_slices = [0.1, 0.5, 0.9]
 
     for pol_name, pol_fn in POLICIES.items():
@@ -278,9 +332,14 @@ def main():
 
             if abs(a_val - 0.1) < 0.01:
                 for p, pn in enumerate(["A", "B", "C"]):
-                    plot_exploit(exploit_per[p], grid_vals, pol_name, a_val,
-                                 f"figs/exploit_{pn}_{tag}.pdf",
-                                 label=f"Exploitability of {pn}")
+                    plot_exploit(
+                        exploit_per[p],
+                        grid_vals,
+                        pol_name,
+                        a_val,
+                        f"figs/exploit_{pn}_{tag}.pdf",
+                        label=f"Exploitability of {pn}",
+                    )
             print("done")
 
     print("\nAll figures saved to figs/")
